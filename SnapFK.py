@@ -10,25 +10,12 @@ class MainWindow():
 
 # -- Functions -------------#
 
-# Updates constraints
-def UpdateConstraints(controller):
-    constraints = pm.listRelatives(controller, children=True, type=('orientConstraint', 'parentConstraint'))
-    for constraint in constraints:
-        parents = pm.listConnections(constraint, source=True, type='transform')
-        ctrlParent = None
-        for parent in parents:
-            if str(parent) != controller and str(parent) != str(constraint):
-                ctrlParent = parent
-                break
-        print(str(constraint))
-        pm.parentConstraint(str(ctrlParent), str(constraint), e=True, maintainOffset=True)
-
 # Returns the children constrained to a controller as a set
-def GetConstraintChildren(controller, childrenType):
+def GetConstraintChildren(controller, childrenType, constraintType=('parentConstraint', 'orientConstraint', 'pointConstraint')):
     outChildren = set()
-    constraints = set(pm.listConnections(controller, destination=True, type=('parentConstraint', 'orientConstraint', 'pointConstraint')))
+    constraints = set(pm.listConnections(controller, source=False, destination=True, exactType=True, type=constraintType))
     for constraint in constraints:
-        children = set(pm.listConnections(constraint, destination=True, type=childrenType))
+        children = set(pm.listConnections(constraint, source=False, destination=True, exactType=True, type=childrenType))
         outChildren = outChildren.union(children)
     return outChildren
 
@@ -74,15 +61,16 @@ def SetIKAttributes(*args):
         pm.addAttr(handle, longName="poleVectorController", dataType='string', niceName="Pole Vector Controller")
         pm.addAttr(handle, longName="poleVectorLength", attributeType='double', niceName="Pole Vector Length")
 
-    poleConstraint = pm.listConnections(handle, source=True, type=('poleVectorConstraint'))[0]
-    poleParents = pm.listConnections(poleConstraint, source=True, type='transform')
+    poleConstraint = pm.listConnections(handle, destination=False, source=True, exactType=True, type=('poleVectorConstraint'))[0]
+    poleParents = pm.listConnections(poleConstraint, destination=False, source=True, type='transform')
     poleCtrl = None
     for poleCtrl in poleParents:
         if poleCtrl != handle and pm.nodeType(poleCtrl) != "joint":
             break
-    midJnt = pm.ikHandle(handle, q=True, jl=True)[1]
-    P0 = pm.dt.Vector(pm.xform(midJnt, rotatePivot=True, q=True, worldSpace=True))
-    P1 = pm.dt.Vector(pm.xform(poleCtrl, rotatePivot=True, q=True, worldSpace=True))
+
+    P0 = pm.dt.Vector(pm.xform(handle, rotatePivot=True, q=True, worldSpace=True))
+    P1 = pm.dt.Vector(pm.xform(poleCtrl, rotatePivot=True, q=True, worldSpace=True)) - \
+         pm.dt.Vector(pm.xform(poleCtrl, translation=True, q=True, worldSpace=True))
 
     pm.setAttr(str(selection[0]) + ".childIK", str(handle))
     pm.setAttr(str(handle) + ".poleVectorController", str(poleCtrl))
@@ -139,6 +127,16 @@ def SnapIK(ctrlJoints):
                 print("No snap controller has been set for IK handle {}".format(str(handle)))
                 continue
 
+            # Snap controller rotation
+            snapCtrlRot = pm.dt.TransformationMatrix(pm.xform(snapCtrl, worldSpace=True, matrix=True, q=True))
+            snapCtrlRotOffset = pm.dt.TransformationMatrix(pm.dt.EulerRotation(pm.getAttr(str(snapCtrl) + ".controllerRotOffset")))
+            ctrlRotOffset = pm.dt.TransformationMatrix(pm.dt.EulerRotation(pm.getAttr(str(ctrl) + ".controllerRotOffset")))
+            deltaMat = pm.dt.TransformationMatrix(snapCtrlRotOffset.asMatrixInverse() * snapCtrlRot)
+            newRot = (ctrlRotOffset * deltaMat).euler * 180 / math.pi
+
+            pm.xform(ctrl, rotation=newRot, worldSpace=True)
+
+            # Snap pole controller location
             affectedJoints = pm.ikHandle(handle, q=True, jl=True)
             poleCtrl = pm.getAttr(str(handle) + ".poleVectorController")
 
@@ -161,33 +159,15 @@ def SnapIK(ctrlJoints):
             map(lambda x: x.normalize(), (N1, N2))
             
             # Find vector from the handle to the zero-translate pole vector controller
-            v3 = (N1.cross(v0)  - v0).normal()
+            v3 = (N1.cross(v0) - v0).normal()
 
-            a = math.acos(N1.dot(N2))
+            detMat = pm.dt.Matrix(N1, N2, N1.cross(N2).normal())
+            a = math.atan2(detMat.det3x3(), N1.dot(N2))
             R1 = pm.dt.TransformationMatrix()
             R1.setToRotationAxis(N1.cross(N2), -a)
-            P3 = R1 * v3 * (P4 - P2).length()
+            P3 = R1 * v3 * pm.getAttr(str(handle) + ".poleVectorLength")
 
             pm.xform(poleCtrl, translation=P2 + P3 - P4, worldSpace=True)
-
-# Resets the selected controllers
-def ResetControllers(ctrlJoints):
-    for ctrl in ctrlJoints:
-        pm.xform(ctrl, translation=[0,0,0], rotation=[0,0,0], objectSpace=True)
-        UpdateConstraints(ctrl)
-        
-        # Reset IK twist
-        try:
-            pm.getAttr(str(ctrl) + ".childIK")
-        except:
-            continue
-        else:
-            pm.setAttr(str(ctrl) + ".IKTwist", 0)
-
-# Updates the active constraints to avoid auto snapping on parent change
-def MaintainOffset(ctrlJoints):
-    for ctrl in ctrlJoints:
-        UpdateConstraints(ctrl)
 
 # Creates and initializes the main window
 def SnapFKWindow(*arg):
@@ -208,10 +188,6 @@ def SnapFKWindow(*arg):
     pm.button(label='Snap Controllers to Joints', command='SnapFK(mainWindow.ctrlJoints)')
     pm.separator()
     pm.button(label='Snap IK Handles to Joints', command='SnapIK(mainWindow.ctrlJoints)')
-    pm.separator()
-    pm.button(label='Update Constraints', command='MaintainOffset(mainWindow.ctrlJoints)')
-    pm.separator()
-    pm.button(label='Reset Controllers', command='ResetControllers(mainWindow.ctrlJoints)')
     
     pm.showWindow()
 
